@@ -139,7 +139,7 @@ class IncrementalObjectTracker:
         sam2_model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
         sam2_ckpt_path="./checkpoints/sam2.1_hiera_large.pt",
         device="cuda",
-        prompt_text="car.",
+        prompt_text="black car.",
         detection_interval=20,
     ):
         """
@@ -483,16 +483,24 @@ def main():
         prompt_text=prompt_text,
         detection_interval=detection_interval,
     )
-    tracker.set_prompt("person.")
+    tracker.set_prompt("person with blue shirt.")
 
     # Open the camera (or replace with local video file, e.g., cv2.VideoCapture("video.mp4"))
-    cap = cv2.VideoCapture(0)
+    cap = cap = cv2.VideoCapture("http://host.docker.internal:8080/video")
     if not cap.isOpened():
         print("[Error] Cannot open camera.")
         return
 
     print("[Info] Camera opened. Press 'q' to quit.")
     frame_idx = 0
+
+    height, width = 480, 640  # Adjust if known
+    video_writer = cv2.VideoWriter(
+        os.path.join(output_dir, "live_tracking.mp4"),
+        cv2.VideoWriter_fourcc(*'mp4v'),
+        20,
+        (width, height)
+    )
 
     try:
         while True:
@@ -510,13 +518,17 @@ def main():
                 frame_idx += 1
                 continue
 
-            # process_image_bgr = cv2.cvtColor(process_image, cv2.COLOR_RGB2BGR)
+            process_image_bgr = cv2.cvtColor(process_image, cv2.COLOR_RGB2BGR)
             # cv2.imshow("Live Inference", process_image_bgr)
-
-            
+            #
+            #
             # if cv2.waitKey(1) & 0xFF == ord('q'):
             #     print("[Info] Quit signal received.")
             #     break
+
+            # Save current processed frame
+            cv2.imwrite(os.path.join(output_dir, "live_frame.jpg"), process_image_bgr)
+            video_writer.write(process_image_bgr)
 
             tracker.save_current_state(output_dir=output_dir, raw_image=frame_rgb)
             frame_idx += 1
@@ -529,6 +541,7 @@ def main():
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        video_writer.release()
         print("[Done] Live inference complete.")
 
 
