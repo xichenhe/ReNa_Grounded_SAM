@@ -13,6 +13,13 @@ from utils.common_utils import CommonUtils
 from utils.mask_dictionary_model import MaskDictionaryModel, ObjectInfo
 from utils.track_utils import sample_points_from_masks
 from utils.video_utils import create_video_from_images
+import time
+import struct
+import json
+import zmq
+
+from Eyetracking.configs import *
+from Eyetracking.EyeUtils import add_bounding_box, clip_bbox
 
 # Setup environment
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
@@ -42,11 +49,11 @@ class GroundingDinoPredictor:
         )
 
     def predict(
-        self,
-        image: "PIL.Image.Image",
-        text_prompts: str,
-        box_threshold=0.25,
-        text_threshold=0.25,
+            self,
+            image: "PIL.Image.Image",
+            text_prompts: str,
+            box_threshold=0.25,
+            text_threshold=0.25,
     ):
         """
         Perform object detection using text prompts.
@@ -134,13 +141,13 @@ class SAM2ImageSegmentor:
 
 class IncrementalObjectTracker:
     def __init__(
-        self,
-        grounding_model_id="IDEA-Research/grounding-dino-tiny",
-        sam2_model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
-        sam2_ckpt_path="./checkpoints/sam2.1_hiera_large.pt",
-        device="cuda",
-        prompt_text="black car.",
-        detection_interval=20,
+            self,
+            grounding_model_id="IDEA-Research/grounding-dino-tiny",
+            sam2_model_cfg="configs/sam2.1/sam2.1_hiera_l.yaml",
+            sam2_ckpt_path="./checkpoints/sam2.1_hiera_large.pt",
+            device="cuda",
+            prompt_text="car.",
+            detection_interval=20,
     ):
         """
         Initialize an incremental object tracker using GroundingDINO and SAM2.
@@ -384,10 +391,10 @@ class IncrementalObjectTracker:
             )
 
     def visualize_frame_with_mask_and_metadata(
-        self,
-        image_np: np.ndarray,
-        mask_array: np.ndarray,
-        json_metadata: dict,
+            self,
+            image_np: np.ndarray,
+            mask_array: np.ndarray,
+            json_metadata: dict,
     ):
         image = image_np.copy()
         H, W = image.shape[:2]
@@ -465,7 +472,41 @@ import torch
 from utils.common_utils import CommonUtils
 
 
+'''----------------------------------------------------Receive the image streaming from Unity--------------------------------------------------------------'''
+# zmq camera capture fields #######################################
+
+def get_cam_socket(sub_tcpAddress, topic: str):
+    context = zmq.Context()
+    cam_capture_sub_socket = context.socket(zmq.SUB)
+    cam_capture_sub_socket.connect(sub_tcpAddress)
+    cam_capture_sub_socket.setsockopt_string(zmq.SUBSCRIBE, topic)
+    return cam_capture_sub_socket
+
+def receive_decode_image(socket):
+    received = socket.recv_multipart()
+    timestamp = struct.unpack('d', received[1])[0]
+    colorImagePNGBytes = received[2]
+    depthImagePNGBytes = received[3]
+    item_bboxes = received[4]
+
+    colorImg = np.frombuffer(colorImagePNGBytes, dtype='uint8').reshape((*image_shape[:2], 4))
+    depthImg = np.frombuffer(depthImagePNGBytes, dtype='uint16').reshape((*image_shape[:2], 1))
+
+    colorImg = colorImg[:, :, :3]
+    colorImg = cv2.flip(colorImg, 0)
+    colorImg = cv2.cvtColor(colorImg, cv2.COLOR_BGR2RGB)
+    depthImg = cv2.flip(depthImg, 0)
+
+    item_bboxes = json.loads(item_bboxes)
+
+    return colorImg, depthImg, timestamp, item_bboxes
+
+
 def main():
+    print("[Device Check] torch.cuda.is_available():", torch.cuda.is_available())
+    print("[Device Check] Current device:", torch.cuda.current_device())
+    print("[Device Check] Device name:", torch.cuda.get_device_name(0))
+
     # Parameter settings
     output_dir = "./outputs"
     prompt_text = "hand."
@@ -483,35 +524,37 @@ def main():
         prompt_text=prompt_text,
         detection_interval=detection_interval,
     )
-    tracker.set_prompt("person with blue shirt.")
+    '''TODO-------------------------------------------------------'''
+    tracker.set_prompt("white shirt.")
 
     # Open the camera (or replace with local video file, e.g., cv2.VideoCapture("video.mp4"))
-    cap = cap = cv2.VideoCapture("http://host.docker.internal:8080/video")
-    if not cap.isOpened():
-        print("[Error] Cannot open camera.")
-        return
+    # cap = cv2.VideoCapture("http://host.docker.internal:8080/video")
+    # if not cap.isOpened():
+    #     print("[Error] Cannot open camera.")
+    #     return
+
+    back_cam_socket = get_cam_socket("tcp://host.docker.internal:5559", 'ColorDepthCamBack')
+
+
 
     print("[Info] Camera opened. Press 'q' to quit.")
     frame_idx = 0
 
-    height, width = 480, 640  # Adjust if known
-    video_writer = cv2.VideoWriter(
-        os.path.join(output_dir, "live_tracking.mp4"),
-        cv2.VideoWriter_fourcc(*'mp4v'),
-        20,
-        (width, height)
-    )
-
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[Warning] Failed to capture frame.")
-                break
+            # ret, frame = cap.read()
+            # if not ret:
+            #     print("[Warning] Failed to capture frame.")
+            #     break
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            back_cam_color, back_cam_depth, timestamp_back, bboxes_back = receive_decode_image(back_cam_socket)
+
+            frame_rgb = cv2.cvtColor(back_cam_color, cv2.COLOR_BGR2RGB)
             print(f"[Frame {frame_idx}] Processing live frame...")
+            start = time.time()
+            '''----------------------------TODO-------------------------------------'''
             process_image = tracker.add_image(frame_rgb)
+            print(f"Inference time: {time.time() - start:.2f} sec")
 
             if process_image is None or not isinstance(process_image, np.ndarray):
                 print(f"[Warning] Skipped frame {frame_idx} due to empty result.")
@@ -519,29 +562,23 @@ def main():
                 continue
 
             process_image_bgr = cv2.cvtColor(process_image, cv2.COLOR_RGB2BGR)
-            # cv2.imshow("Live Inference", process_image_bgr)
-            #
-            #
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     print("[Info] Quit signal received.")
-            #     break
+            cv2.imshow("Live Inference", process_image_bgr)
 
-            # Save current processed frame
-            cv2.imwrite(os.path.join(output_dir, "live_frame.jpg"), process_image_bgr)
-            video_writer.write(process_image_bgr)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[Info] Quit signal received.")
+                break
 
-            tracker.save_current_state(output_dir=output_dir, raw_image=frame_rgb)
+            # tracker.save_current_state(output_dir=output_dir, raw_image=frame_rgb)
             frame_idx += 1
 
-            if frame_idx >= max_frames:
-                print(f"[Info] Reached max_frames {max_frames}. Stopping.")
-                break
+            # if frame_idx >= max_frames:
+            #     print(f"[Info] Reached max_frames {max_frames}. Stopping.")
+            #     break
     except KeyboardInterrupt:
         print("[Info] Interrupted by user (Ctrl+C).")
     finally:
-        cap.release()
+        # cap.release()
         cv2.destroyAllWindows()
-        video_writer.release()
         print("[Done] Live inference complete.")
 
 
